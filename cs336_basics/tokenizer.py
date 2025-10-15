@@ -3,351 +3,258 @@ import regex as re
 import multiprocessing
 import heapq
 from collections import Counter
-from typing import Dict, Tuple, BinaryIO, List
+from typing import Dict, Tuple, List, Iterable, Iterator
 
 
-def find_chunk_boundaries(
-    file: BinaryIO,
-    desired_num_chunks: int,
-    split_special_token: bytes,
-) -> list[int]:
-    """
-    Chunk the file into parts that can be counted independently.
-    May return fewer chunks if the boundaries end up overlapping.
-    """
-    assert isinstance(split_special_token, bytes), "Must represent special token as a bytestring"
-
-    # Get total file size in bytes
-    file.seek(0, os.SEEK_END)
-    file_size = file.tell()
-    file.seek(0)
-
-    chunk_size = file_size // desired_num_chunks
-
-    # Initial guesses for chunk boundary locations, uniformly spaced
-    # Chunks start on previous index, don't include last index
-    chunk_boundaries = [i * chunk_size for i in range(desired_num_chunks + 1)]
-    chunk_boundaries[-1] = file_size
-
-    mini_chunk_size = 4096  # Read ahead by 4k bytes at a time
-
-    for bi in range(1, len(chunk_boundaries) - 1):
-        initial_position = chunk_boundaries[bi]
-        file.seek(initial_position)  # Start at boundary guess
-        while True:
-            mini_chunk = file.read(mini_chunk_size)  # Read a mini chunk
-
-            # If EOF, this boundary should be at the end of the file
-            if mini_chunk == b"":
-                chunk_boundaries[bi] = file_size
-                break
-
-            # Find the special token in the mini chunk
-            found_at = mini_chunk.find(split_special_token)
-            if found_at != -1:
-                chunk_boundaries[bi] = initial_position + found_at
-                break
-            initial_position += mini_chunk_size
-
-    # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
-    return sorted(set(chunk_boundaries))
-
-
-def heap_key(pair: Tuple[int, int], vocab: Dict[int, bytes]) -> tuple[int, ...]:
-    left = vocab[pair[0]]
-    right = vocab[pair[1]]
-    left_key = tuple(-byte for byte in left)
-    right_key = tuple(-byte for byte in right)
-    return left_key + (-len(left),) + right_key + (-len(right),)
-
-# def heap_key(pair: Tuple[int, int], vocab: Dict[int, bytes]) -> tuple[int, ...]:
-# This  implementation lost the boundary between left and right tokens — so:
-# Two different pairs (e.g., (A,B) and (AA,) if those exist) might produce the same combined byte sequence.
-# There’s no tie-breaker for pairs of the same combined bytes but different lengths.
-# Heap ordering becomes unstable or inconsistent between runs (depending on Python’s tuple comparison fallback).
-#     left = vocab[pair[0]]
-#     right = vocab[pair[1]]
-#     combined = left + right
-#     return tuple(-byte for byte in combined)
-
-class BPETokenizer:
-    def __init__(
-        self,
-        weight_path: str | None = None,
-    ):
-        self.corpus_map: Dict[Tuple[bytes, ...], int] = {}
-        self.vocab_size = 0
-        self.max_vocab_size = 0
-        self.special_tokens: list[str] = []
-        self.vocab: Dict[int, bytes] = {}
-        self.token_to_id: Dict[bytes, int] = {}
-        self.merges: List[Tuple[bytes, bytes]] = []
-
-        if weight_path is not None:
-            vocab_path = os.path.join(weight_path, "vocab.txt")
-            merges_path = os.path.join(weight_path, "merges.txt")
-            self.load_tokenizer(vocab_path, merges_path)
-        
-    def __initialize(self, data_path: str, vocab_size: int, special_tokens: list[str], num_workers: int = 4):
-        self.pre_token_pattern = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-        self.special_tokens = special_tokens
-        self.merges: List[Tuple[bytes, bytes]] = []
-        self.vocab, self.token_to_id = None, None
-        self.build_vocab(special_tokens)
-        assert self.vocab is not None and self.token_to_id is not None
-        self.max_vocab_size = vocab_size
-        split_special = special_tokens[0].encode("utf-8") if special_tokens else b""
-        if data_path is not None:
-            self.corpus_map = self.processing_corpus(
-                data_path, num_workers, split_special, special_tokens
-            )
-        else:
-            raise ValueError("Data path must be provided for training.")
-            
-    def build_vocab(self, special_tokens) -> None:
-        self.vocab: Dict[int, bytes] = {i: bytes([i]) for i in range(256)}
-        self.token_to_id: Dict[bytes, int] = {token: token_id for token_id, token in self.vocab.items()}
-        self.vocab_size = len(self.vocab)
-        for token in special_tokens:
-            token_bytes = token.encode("utf-8")
-            if token_bytes not in self.vocab:
-                self.token_to_id[token_bytes] = self.vocab_size
-                self.vocab[self.vocab_size] = token_bytes
-                self.vocab_size += 1
-    
-    def processing_corpus(
-            self, file_name, n_proc, split_special_token, special_tokens
-        ) -> Dict[Tuple[bytes, bytes], int]:
-        with open(file_name, "rb") as file:
-            boundaries = find_chunk_boundaries(file, n_proc, split_special_token)
-
-        if n_proc <= 1:
-            total_token_freq = Counter()
-            for start, end in zip(boundaries[:-1], boundaries[1:]):
-                total_token_freq.update(self.pre_tokenize_worker(file_name, start, end, special_tokens))
-        else:
-            with multiprocessing.Pool(n_proc) as pool:
-                results = [
-                    pool.apply_async(self.pre_tokenize_worker, args=(file_name, start, end, special_tokens))
-                    for start, end in zip(boundaries[:-1], boundaries[1:])
-                ]
-                token_freqs = [res.get() for res in results]
-                total_token_freq = Counter()
-                for tf in token_freqs:
-                    total_token_freq.update(tf)
-        return dict(total_token_freq)
-
-    def pre_tokenize_worker(
-                    self, 
-                    file_name: str, 
-                    start: int, 
-                    end: int, 
-                    special_tokens: list[str],
-                ) -> Counter:
-        with open(file_name, "rb") as file:
-            file.seek(start)
-            corpus_chunk = file.read(end - start).decode('utf-8', errors='ignore')
-        return self.pre_tokenize_text(corpus_chunk, special_tokens)
-
-    def pre_tokenize_text(
-                    self,
-                    corpus_chunk: str,
-                    special_tokens: list[str],
-                ) -> Dict[Tuple[bytes, bytes], int]:
-        token_freq:Dict[Tuple[bytes, bytes], int] = Counter()
-        # Remove special token from the chunk if present
-        # and split the chunk by the special token
-        split_pat = "|".join(map(re.escape, special_tokens))
-        corpus_chunks = [seg for seg in re.split(split_pat, corpus_chunk) if seg]
-        for corpus_chunk in corpus_chunks:
-            for m in re.finditer(self.pre_token_pattern, corpus_chunk):
-                token = tuple(m.group(0).encode('utf-8'))
-                token_freq[token] += 1
-        return token_freq
-    
-    def get_pair(self, ) -> Dict[Tuple[bytes, bytes], int]:
-        pair_freq: Dict[Tuple[bytes, bytes], int] = Counter()
-        for seq, freq in self.corpus_map.items():
-            if len(seq) < 2:
+def load_tokenizer(vocab_path: str, merges_path: str) -> Tuple[Dict[int, bytes], List[Tuple[bytes, bytes]]]:
+    vocab: Dict[int, bytes] = {}
+    with open(vocab_path, "r", encoding="utf-8") as vocab_file:
+        for line in vocab_file:
+            if not line.strip():
                 continue
-            for pair in zip(seq, seq[1:]):
-                pair_freq[pair] += freq
-        return pair_freq
+            token_id_str, token_hex = line.rstrip().split("\t")
+            vocab[int(token_id_str)] = bytes.fromhex(token_hex)
+    merges: List[Tuple[bytes, bytes]] = []
+    with open(merges_path, "r", encoding="utf-8") as merges_file:
+        for line in merges_file:
+            if not line.strip():
+                continue
+            left_hex, right_hex = line.rstrip().split("\t")
+            merges.append((bytes.fromhex(left_hex), bytes.fromhex(right_hex)))
+    return vocab, merges
 
-    def train(
-            self,
-            file_path: str | None = None,
-            vocab_size: int | None = None,
-            special_tokens: list[str] | None = None,
-            num_workers: int = 4,
-        ) -> Tuple[Dict[int, bytes], List[Tuple[bytes, bytes]]]:
-        '''
-        Return:
-            vocab - The new vocab mapping from token id to token bytes.
-            merges - The list of merges performed, in order, as pairs of token bytes.
-        '''
-        if file_path is not None:
-            if special_tokens is None:
-                special_tokens = self.special_tokens or ["<|endoftext|>"]
-            if vocab_size is None:
-                vocab_size = self.max_vocab_size
-            self.__initialize(file_path, vocab_size, special_tokens, num_workers)
-        elif self.vocab is None or self.token_to_id is None:
-            raise ValueError("Tokenizer is uninitialized. Provide training data or load weights before calling train.")
 
-        assert self.vocab is not None and self.token_to_id is not None 
-        assert self.corpus_map is not None
+class Tokenizer():
+    def __init__(self, vocab=None, merges=None, special_tokens=None):
+        self.vocab = dict(vocab) if vocab is not None else {}
+        self.merges = list(merges) if merges is not None else []
+        self.token_to_id = {v: k for k, v in self.vocab.items()}
+        self.special_tokens = list(special_tokens) if special_tokens else []
+        token_pattern = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+        self._base_pre_token_pattern = token_pattern
+        self._base_pre_token_re = re.compile(self._base_pre_token_pattern)
+        self._special_prefixes: set[str] = set()
+        self._special_prefix_lengths: List[int] = []
+        if self.special_tokens:
+            escaped_specials = [re.escape(tok) for tok in sorted(self.special_tokens, key=len, reverse=True)]
+            self._special_re = re.compile("|".join(escaped_specials))
+            prefix_set: set[str] = set()
+            for token in self.special_tokens:
+                for i in range(1, len(token)):
+                    prefix_set.add(token[:i])
+            self._special_prefixes = prefix_set
+            self._special_prefix_lengths = sorted({len(p) for p in prefix_set}, reverse=True)
+        else:
+            self._special_re = None
+        
+    def from_files(vocab_path: str, merges_path: str, special_tokens: List[str]):
+        return Tokenizer(*load_tokenizer(vocab_path, merges_path), special_tokens)
 
-        pair_freq = self.get_pair()
+    def _encode_pre_token(
+                        self, 
+                        pre_token_bytes: bytes, 
+                        bpe_rank: Dict[Tuple[bytes, bytes], int]
+                    ) -> List[int]:
+        # Fast-path for complete tokens (e.g., special tokens) already present in vocab.
+        token_id = self.token_to_id.get(pre_token_bytes)
+        if token_id is not None:
+            return [token_id]
 
-        if not pair_freq:
-            return self.vocab, self.merges
+        pre_token = tuple(bytes([b]) for b in pre_token_bytes)
+        encoded: List[int] = []
 
-        heap = [(-freq, heap_key(pair, self.vocab), pair) for pair, freq in pair_freq.items()]
-        heapq.heapify(heap)
-        self.merges = []
-
-        def decrement_pair(pair: Tuple[int, int], amount: int):
-            current = pair_freq.get(pair)
-            if current is None:
-                return
-            new_val = current - amount
-            if new_val <= 0:
-                pair_freq.pop(pair, None)
-            else:
-                pair_freq[pair] = new_val
-                heapq.heappush(heap, (-new_val, heap_key(pair, self.vocab), pair))
-
-        def increment_pair(pair: Tuple[int, int], amount: int):
-            new_val = pair_freq.get(pair, 0) + amount
-            pair_freq[pair] = new_val
-            heapq.heappush(heap, (-new_val, heap_key(pair, self.vocab), pair))
-
-        while self.vocab_size < self.max_vocab_size:
-            while heap:
-                neg_freq, _, pair = heapq.heappop(heap)
-                freq = -neg_freq
-                current = pair_freq.get(pair)
-                if current is None:
+        while len(pre_token) > 1:
+            heap: List[Tuple[int, Tuple[bytes, bytes]]] = []
+            for pair_bytes in zip(pre_token, pre_token[1:]):
+                left, right = pair_bytes
+                left_id = self.token_to_id.get(left)
+                right_id = self.token_to_id.get(right)
+                if left_id is None or right_id is None:
                     continue
-                if current != freq:
-                    heapq.heappush(heap, (-current, heap_key(pair, self.vocab), pair))
-                    continue
-                best_pair = pair
-                break
-            else:
-                break
-
-            best_count = pair_freq.get(best_pair, 0)
-            if best_count <= 0:
+                merged_pair = (self.vocab[left_id], self.vocab[right_id])
+                rank = bpe_rank.get(merged_pair)
+                if rank is not None:
+                    heapq.heappush(heap, (rank, merged_pair))
+            if not heap:
                 break
 
-            left_bytes, right_bytes = self.vocab[best_pair[0]], self.vocab[best_pair[1]]
-            new_token = left_bytes + right_bytes
-            new_id = self.vocab_size
-            self.vocab[new_id] = new_token
-            self.token_to_id[new_token] = new_id
-            self.vocab_size += 1
-            self.merges.append((left_bytes, right_bytes))
-            pair_freq.pop(best_pair, None)
-            new_freq_map: Dict[Tuple[bytes, bytes], int] = {}
-            any_sequence_updated = False
+            _, best_pair = heapq.heappop(heap)
+            new_token = best_pair[0] + best_pair[1]
+            new_pre_token: Tuple[bytes, ...] = tuple()
+            i = 0
+            while i < len(pre_token):
+                if (
+                    i < len(pre_token) - 1
+                    and (pre_token[i], pre_token[i + 1]) == best_pair
+                ):
+                    new_pre_token += (new_token,)
+                    i += 2
+                else:
+                    new_pre_token += (pre_token[i],)
+                    i += 1
+            pre_token = new_pre_token
 
-            for seq_tuple, seq_freq in self.corpus_map.items():
-                seq = list(seq_tuple)
-                if len(seq) < 2:
-                    new_freq_map[seq_tuple] = new_freq_map.get(seq_tuple, 0) + seq_freq
-                    continue
+        for token in pre_token:
+            token_id = self.token_to_id.get(token)
+            if token_id is None:
+                raise ValueError(f"Token {token} not in vocabulary.")
+            encoded.append(token_id)
 
-                merged: list[int] = []
-                idx = 0
-                updated = False
-
-                while idx < len(seq):
-                    if (
-                        idx + 1 < len(seq)
-                        and self.vocab[seq[idx]] == left_bytes
-                        and self.vocab[seq[idx + 1]] == right_bytes
-                    ):  
-                        if not updated:
-                            for a, b in zip(seq, seq[1:]):
-                                decrement_pair((a, b), seq_freq)
-                            updated = True
-                            any_sequence_updated = True
-                        merged.append(new_id)
-                        idx += 2
-                    else:
-                        merged.append(seq[idx])
-                        idx += 1
-
-                merged_tuple = tuple(merged)
-                new_freq_map[merged_tuple] = new_freq_map.get(merged_tuple, 0) + seq_freq
-
-                if updated and len(merged) >= 2:
-                    for a, b in zip(merged, merged[1:]):
-                        increment_pair((a, b), seq_freq)
-
-            if not any_sequence_updated:
-                # No corpus updates; revert merge and treat as convergence
-                self.vocab.pop(new_id, None)
-                self.token_to_id.pop(new_token, None)
-                self.vocab_size -= 1
-                self.merges.pop()
-                break
-
-            self.corpus_map = new_freq_map
-
-        return self.vocab, self.merges
+        return encoded
+        
+    def encode(self, text: str) -> List[int]:
+        return list(self.encode_iterable([text]))
     
-    def save(self, vocab_path: str, merges_path: str) -> None:
+    def encode_iterable(self, texts: Iterable[str]) -> Iterator[int]:
+        if not self.vocab or not self.token_to_id:
+            raise ValueError("Vocabulary is not initialized. Provide vocab and merges before encoding.")
+        split_pat = "|".join(map(re.escape, self.special_tokens))
+        bpe_rank = {pair: i for i, pair in enumerate(self.merges)}
+        buffer = ""
+        
+        def consume_buffer(buf: str, flush: bool) -> Iterator[int]:
+            idx = 0
+            length = len(buf)
+            guard_len = 0
+            if not flush and self._special_prefix_lengths:
+                for prefix_len in self._special_prefix_lengths:
+                    if prefix_len <= length and buf[length - prefix_len:] in self._special_prefixes:
+                        guard_len = prefix_len
+                        break
+            process_limit = length - guard_len
+            if split_pat:
+                chunks = [seg for seg in re.split(split_pat, buf[:process_limit])]
+            else:
+                chunks = [buf[:process_limit]]
+            for chunk in chunks:
+                if chunk:
+                    for m in re.finditer(self._base_pre_token_pattern, chunk):
+                        token_bytes = m.group(0).encode("utf-8")
+                        for token_id in self._encode_pre_token(token_bytes, bpe_rank):
+                            yield token_id
+                idx += len(chunk)
+                if self._special_re:
+                    special_match = self._special_re.search(buf, idx, process_limit)
+                    if special_match:
+                        if not flush and special_match.end() == length:
+                            return buf[special_match.start():]
+                        token_bytes = special_match.group(0).encode("utf-8")
+                        for token_id in self._encode_pre_token(token_bytes, bpe_rank):
+                            yield token_id
+                        idx = special_match.end()
+            return buf[idx:]
+
+        for fragment in texts:
+            if not fragment:
+                continue
+            buffer += fragment
+            buffer = yield from consume_buffer(buffer, flush=False) or ""
+        buffer = yield from consume_buffer(buffer, flush=True) or ""
+        if buffer:
+            raise ValueError("Unprocessed text remained after encoding iterable.")
+    
+    def encode_iterable_stream(self, texts: Iterable[str]) -> Iterator[int]:
+        if not self.vocab or not self.token_to_id:
+            raise ValueError("Vocabulary is not initialized. Provide vocab and merges before encoding.")
+
+        bpe_rank = {pair: i for i, pair in enumerate(self.merges)}
+        buffer = ""
+
+        def consume_segment(segment: str, flush_segment: bool) -> Iterator[int]:
+            seg_idx = 0
+            seg_len = len(segment)
+
+            while seg_idx < seg_len:
+                match = self._base_pre_token_re.match(segment, seg_idx)
+                if not match:
+                    if not flush_segment:
+                        break
+                    token_bytes = segment[seg_idx].encode("utf-8")
+                    for token_id in self._encode_pre_token(token_bytes, bpe_rank):
+                        yield token_id
+                    seg_idx += 1
+                    continue
+
+                if not flush_segment and match.end() == seg_len:
+                    break
+
+                token_bytes = match.group(0).encode("utf-8")
+                for token_id in self._encode_pre_token(token_bytes, bpe_rank):
+                    yield token_id
+                seg_idx = match.end()
+
+            return segment[seg_idx:]
+
+        def consume_buffer(buf: str, flush: bool) -> Iterator[int]:
+            idx = 0
+            length = len(buf)
+            guard_len = 0
+            # Don't split special tokens across buffer boundaries
+            if not flush and self._special_prefix_lengths:
+                for prefix_len in self._special_prefix_lengths:
+                    if prefix_len <= length and buf[length - prefix_len:] in self._special_prefixes:
+                        guard_len = prefix_len
+                        break
+            process_limit = length - guard_len
+
+            while idx < process_limit:
+                special_match = None
+                # Deal with special tokens separately
+                if self._special_re:
+                    special_match = self._special_re.search(buf, idx, process_limit)
+                next_cut = special_match.start() if special_match else length
+                next_cut = min(next_cut, process_limit)
+                if idx < next_cut:
+                    segment_end = next_cut
+                    segment = buf[idx:segment_end]
+                    flush_segment = flush or (special_match is not None) or (process_limit < length)
+                    segment_leftover = yield from consume_segment(segment, flush_segment=flush_segment)
+                    if segment_leftover:
+                        consumed = len(segment) - len(segment_leftover)
+                        return buf[idx + consumed:]
+                    idx = segment_end
+
+                if special_match:
+                    if not flush and special_match.end() == length:
+                        return buf[special_match.start():]
+                    token_bytes = special_match.group(0).encode("utf-8")
+                    for token_id in self._encode_pre_token(token_bytes, bpe_rank):
+                        yield token_id
+                    idx = special_match.end()
+                else:
+                    break
+
+            return buf[idx:]
+
+        for fragment in texts:
+            if not fragment:
+                continue
+            buffer += fragment
+            buffer = yield from consume_buffer(buffer, flush=False) or ""
+
+        buffer = yield from consume_buffer(buffer, flush=True) or ""
+        if buffer:
+            raise ValueError("Unprocessed text remained after encoding iterable.")
+            
+    def decode(self, token_ids: List[int]) -> str:
         if self.vocab is None:
             raise ValueError("Vocabulary is not initialized. Train the tokenizer first.")
-        vocab_dir = os.path.dirname(vocab_path)
-        if vocab_dir:
-            os.makedirs(vocab_dir, exist_ok=True)
-        with open(vocab_path, "w", encoding="utf-8") as vocab_file:
-            for token_id, token_bytes in sorted(self.vocab.items()):
-                vocab_file.write(f"{token_id}\t{token_bytes.hex()}\n")
-        merges_dir = os.path.dirname(merges_path)
-        if merges_dir:
-            os.makedirs(merges_dir, exist_ok=True)
-        with open(merges_path, "w", encoding="utf-8") as merges_file:
-            for left_bytes, right_bytes in self.merges:
-                merges_file.write(f"{left_bytes.hex()}\t{right_bytes.hex()}\n")
-
-    def load_tokenizer(self, vocab_path: str, merges_path: str) -> Tuple[Dict[int, bytes], List[Tuple[bytes, bytes]]]:
-        vocab: Dict[int, bytes] = {}
-        with open(vocab_path, "r", encoding="utf-8") as vocab_file:
-            for line in vocab_file:
-                if not line.strip():
-                    continue
-                token_id_str, token_hex = line.rstrip().split("\t")
-                vocab[int(token_id_str)] = bytes.fromhex(token_hex)
-        merges: List[Tuple[bytes, bytes]] = []
-        with open(merges_path, "r", encoding="utf-8") as merges_file:
-            for line in merges_file:
-                if not line.strip():
-                    continue
-                left_hex, right_hex = line.rstrip().split("\t")
-                merges.append((bytes.fromhex(left_hex), bytes.fromhex(right_hex)))
-        self.merges = merges
-        self.vocab = vocab
-        self.token_to_id = {token: token_id for token_id, token in vocab.items()}
+        tokens = [self.vocab[token_id] for token_id in token_ids]
+        return b"".join(tokens).decode("utf-8", errors="replace")
 
 
 if __name__ == "__main__":
-    import time
-    # file_name = "/home/eddie880509/src/llm_from_scratch/assignment1-basics/cs336_basics/text_corpus.txt"
-    weight_path = "/home/eddie880509/src/llm_from_scratch/assignment1-basics/tinystory"
-    n_proc = 1
     special_tokens = ["<|endoftext|>"]
-    tokenizer = BPETokenizer(weight_path=weight_path)
-    # vocab, merges = tokenizer.train(file_path=file_name, vocab_size=10000, special_tokens=special_tokens, num_workers=n_proc)
-    # find the longest token in the vocab
-    assert tokenizer.vocab is not None
-    longest_token = max(tokenizer.vocab.values(), key=len)
-    print(f"Longest token length: {len(longest_token)}")
-    print(f"Longest token bytes: {longest_token}")
+    tokenizer = Tokenizer(vocab=None, merges=None, special_tokens=special_tokens)
+    tokenizer.vocab = {0: b' ', 1: b'a', 2:b'c', 3: b'e', 4: b'h', 5: b't', 6: b'th', 7: b' c', 8: b' a', 9: b'the', 10: b' at'}
+    tokenizer.token_to_id = {v: k for k, v in tokenizer.vocab.items()}
+    tokenizer.vocab_size = len(tokenizer.vocab)
+    tokenizer.merges = [(b't', b'h'), (b' ', b'c'), (b' ', b'a'), (b'th', b'e'), (b' a', b't')]
+    
+    string = 'the cat ate'
+    tokens = tokenizer.encode(string)
+    print(f"Tokens for '{string}': {tokens}")
+    assert tokens == [9, 7, 1, 5, 10, 3]
     
 
         
