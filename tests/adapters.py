@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import cProfile, pstats, io
 from collections.abc import Iterable
 from typing import IO, Any, BinaryIO
 
@@ -11,6 +10,7 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 from cs336_basics.train_bpe import train_bpe
 from cs336_basics.tokenizer import Tokenizer
+from cs336_basics.model import Linear
 
 def run_linear(
     d_in: int,
@@ -31,7 +31,9 @@ def run_linear(
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
 
-    raise NotImplementedError
+    linear = Linear(d_in, d_out)
+    linear.load_state_dict({"weight": weights})
+    return linear(in_features)
 
 
 def run_embedding(
@@ -600,19 +602,19 @@ def run_train_bpe(
     tokenizer.save("vocab.txt", "merges.txt")
     return tokenizer.vocab, tokenizer.merges
 
-if __name__ == "__main__":
-    input_path = "/projects/bdxi/yshen10/llm_from_scratch/assignment1-basics/data/owt_train.txt"
-    vocab_size = 32000
-    special_tokens = ["<|endoftext|>"]
-    vocab, merges = run_train_bpe(
-        input_path=input_path,
-        vocab_size=vocab_size,
-        special_tokens=special_tokens,
-    )
-    print(f"Vocab size: {len(vocab)}, Merges size: {len(merges)}")
-    print("First 10 vocab items:")
-    for i in range(10):
-        print(f"{i}: {vocab[i]}")
-    print("First 10 merges:")
-    for i in range(10):
-        print(f"{i}: {merges[i]}")
+# if __name__ == "__main__":
+#     input_path = "/projects/bdxi/yshen10/llm_from_scratch/assignment1-basics/data/owt_train.txt"
+#     vocab_size = 32000
+#     special_tokens = ["<|endoftext|>"]
+#     vocab, merges = run_train_bpe(
+#         input_path=input_path,
+#         vocab_size=vocab_size,
+#         special_tokens=special_tokens,
+#     )
+#     print(f"Vocab size: {len(vocab)}, Merges size: {len(merges)}")
+#     print("First 10 vocab items:")
+#     for i in range(10):
+#         print(f"{i}: {vocab[i]}")
+#     print("First 10 merges:")
+#     for i in range(10):
+#         print(f"{i}: {merges[i]}")
