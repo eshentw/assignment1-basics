@@ -601,8 +601,8 @@ def run_train_bpe(
     return tokenizer.vocab, tokenizer.merges
 
 if __name__ == "__main__":
-    input_path = "/home/eddie880509/src/llm_from_scratch/assignment1-basics/data/TinyStoriesV2-GPT4-train.txt"
-    vocab_size = 10000
+    input_path = "/projects/bdxi/yshen10/llm_from_scratch/assignment1-basics/data/owt_train.txt"
+    vocab_size = 32000
     special_tokens = ["<|endoftext|>"]
     vocab, merges = run_train_bpe(
         input_path=input_path,

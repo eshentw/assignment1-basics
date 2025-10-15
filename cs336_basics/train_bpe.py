@@ -4,7 +4,7 @@ import multiprocessing
 import regex as re
 import heapq
 from collections import Counter
-from typing import Dict, Tuple, BinaryIO, List
+from typing import Dict, Tuple, BinaryIO, List, Union
 
 
 def find_chunk_boundaries(
@@ -72,8 +72,7 @@ def heap_key(pair: Tuple[int, int], vocab: Dict[int, bytes]) -> tuple[int, ...]:
 #     return tuple(-byte for byte in combined)
 
 class BPETrainer:
-    def __init__(
-        self,):
+    def __init__(self,):
         self.pre_token_pattern = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
         self.corpus_map: Dict[Tuple[bytes, ...], int] = {}
         self.vocab_size = 0
@@ -170,9 +169,9 @@ class BPETrainer:
 
     def train(
             self,
-            file_path: str | None = None,
-            vocab_size: int | None = None,
-            special_tokens: list[str] | None = None,
+            file_path: Union[str, None] = None,
+            vocab_size: Union[int, None] = None,
+            special_tokens: Union[list[str], None] = None,
             num_workers: int = 4,
         ) -> Tuple[Dict[int, bytes], List[Tuple[bytes, bytes]]]:
         '''
@@ -310,7 +309,7 @@ class BPETrainer:
                 merges_file.write(f"{left_bytes.hex()}\t{right_bytes.hex()}\n")
 
 
-def train_bpe(file_path: str, vocab_size: int, special_tokens: list[str], num_workers: int = 4):
+def train_bpe(file_path: str, vocab_size: int, special_tokens: list[str], num_workers: int = 8):
     tokenizer = BPETrainer()
     tokenizer.train(
         file_path=file_path,
