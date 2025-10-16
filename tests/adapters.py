@@ -10,7 +10,7 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 from cs336_basics.train_bpe import train_bpe
 from cs336_basics.tokenizer import Tokenizer
-from cs336_basics.model import Linear, Embedding, RMSNorm, FFN
+from cs336_basics.model import Linear, Embedding, RMSNorm, FFN, SiLU
 
 def run_linear(
     d_in: int,
@@ -404,7 +404,8 @@ def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
         Float[Tensor,"..."]: of with the same shape as `in_features` with the output of applying
         SiLU to each element.
     """
-    raise NotImplementedError
+    silu = SiLU()
+    return silu(in_features)
 
 
 def run_get_batch(
@@ -610,7 +611,7 @@ def run_train_bpe(
     tokenizer.save("vocab.txt", "merges.txt")
     return tokenizer.vocab, tokenizer.merges
 
-# if __name__ == "__main__":
+if __name__ == "__main__":
 #     input_path = "/projects/bdxi/yshen10/llm_from_scratch/assignment1-basics/data/owt_train.txt"
 #     vocab_size = 32000
 #     special_tokens = ["<|endoftext|>"]
@@ -626,3 +627,17 @@ def run_train_bpe(
 #     print("First 10 merges:")
 #     for i in range(10):
 #         print(f"{i}: {merges[i]}")
+    d_model = 64
+    d_ff = 128
+    w1_weight = torch.randn(d_ff, d_model)
+    w2_weight = torch.randn(d_model, d_ff)
+    w3_weight = torch.randn(d_ff, d_model)
+    in_features = torch.randn(2, 10, d_model)
+    out_features = run_swiglu(
+        d_model,
+        d_ff,
+        w1_weight,
+        w2_weight,
+        w3_weight,
+        in_features,
+    )

@@ -123,6 +123,6 @@ class FFN(nn.Module):
         """
         x1 = self.linear1(x)
         x2 = self.linear3(x)
-        x = einsum(
-            self.swilu(x1, x2), self.linear2, "... d_ff, d_model dff -> ... d_model")
+        x3 = self.swilu(x1, x2)
+        x = self.linear2(x3)
         return x
