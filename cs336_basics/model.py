@@ -140,7 +140,7 @@ class RoPE(nn.Module):
         # Precompute the sinusoidal frequencies
         inv_freq = 1.0 / (self.theta ** (torch.arange(0, d_k, 2, device=device).float() / d_k))
         t = torch.arange(max_seq_len, device=device).float()
-        freqs = einsum("seq_len , d -> seq_len d", t, inv_freq)  # (max_seq_len, d_k/2)
+        freqs = einsum(t, inv_freq, "seq_len, d -> seq_len d")
         cos_emb = freqs.cos()
         sin_emb = freqs.sin()
         self.register_buffer("cos_emb", cos_emb, persistent=False)  # (max_seq_len, d_k/2)

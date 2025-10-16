@@ -210,7 +210,7 @@ def run_rope(
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
-    rope = RoPE(d_k, theta, max_seq_len)
+    rope = RoPE(theta=theta, d_k=d_k, max_seq_len=max_seq_len)
     return rope(in_query_or_key, token_positions)
 
 
@@ -628,17 +628,15 @@ if __name__ == "__main__":
 #     print("First 10 merges:")
 #     for i in range(10):
 #         print(f"{i}: {merges[i]}")
-    d_model = 64
-    d_ff = 128
-    w1_weight = torch.randn(d_ff, d_model)
-    w2_weight = torch.randn(d_model, d_ff)
-    w3_weight = torch.randn(d_ff, d_model)
-    in_features = torch.randn(2, 10, d_model)
-    out_features = run_swiglu(
-        d_model,
-        d_ff,
-        w1_weight,
-        w2_weight,
-        w3_weight,
-        in_features,
-    )
+    # test rope
+    d_k = 8
+    theta = 100000.0
+    max_seq_len = 1024
+    in_query_or_key = torch.randn(2, 16, d_k)
+    token_positions = torch.arange(16).unsqueeze(0).repeat(2, 1)
+    out = run_rope(d_k, theta, max_seq_len, in_query_or_key, token_positions)
+    print("Input:")
+    print(in_query_or_key)
+    print("Output:")
+    print(out)
+    print("Output shape:", out.shape)
