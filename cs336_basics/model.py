@@ -66,11 +66,12 @@ class RMSNorm(nn.Module):
         Returns:
             output: (..., d_model)
         """
-        x = x + self.eps
-        norm_x = x.norm(2, dim=-1, keepdim=True)
+        in_dtype = x.dtype
+        x = x.to(torch.float32)
+        norm_x = x.norm(2, dim=-1, keepdim=True) + self.eps
         rms_x = norm_x * (self.d_model ** -0.5)
         x_normalized = x / (rms_x)
-        return x_normalized * self.scale
+        return (x_normalized * self.scale).to(in_dtype)
     
 
 class SiLU(nn.Module):
@@ -126,3 +127,40 @@ class FFN(nn.Module):
         x3 = self.swilu(x1, x2)
         x = self.linear2(x3)
         return x
+
+
+class RoPE(nn.Module):
+    def __init__(self, theta: float, d_k: int, max_seq_len: int, device=None):
+        super().__init__()
+        self.theta = theta
+        self.d_k = d_k
+        self.max_seq_len = max_seq_len
+        self.device = device
+
+        # Precompute the sinusoidal frequencies
+        inv_freq = 1.0 / (self.theta ** (torch.arange(0, d_k, 2, device=device).float() / d_k))
+        t = torch.arange(max_seq_len, device=device).float()
+        freqs = einsum("seq_len , d -> seq_len d", t, inv_freq)  # (max_seq_len, d_k/2)
+        cos_emb = freqs.cos()
+        sin_emb = freqs.sin()
+        self.register_buffer("cos_emb", cos_emb, persistent=False)  # (max_seq_len, d_k/2)
+        self.register_buffer("sin_emb", sin_emb, persistent=False)  # (max_seq_len, d_k/2)
+
+    def forward(self, x: torch.Tensor, token_positions: torch.Tensor) -> torch.Tensor:
+        """
+        Parameters:
+            x: (..., seq_len, d_k)
+            token_positions: (..., seq_len)
+        Returns:
+            output: (..., seq_len, d_k)
+        """
+        cos_emb = self.cos_emb[token_positions]  # (..., d_k/2)
+        sin_emb = self.sin_emb[token_positions]  # (..., d_k/2)
+
+        x1, x2 = x[..., ::2], x[..., 1::2]  # (..., d_k/2), (..., d_k/2)
+        x_rotated_1 = x1 * cos_emb - x2 * sin_emb  # (..., d_k/2)
+        x_rotated_2 = x1 * sin_emb + x2 * cos_emb  # (..., d_k/2)
+        x_rotated = torch.empty_like(x)
+        x_rotated[..., ::2] = x_rotated_1
+        x_rotated[..., 1::2] = x_rotated_2
+        return x_rotated
