@@ -50,3 +50,79 @@ class Embedding(nn.Module):
             output: (..., d)
         '''
         return self.embedding[input]
+
+
+class RMSNorm(nn.Module):
+    def __init__(self, d_model: int, eps: float = 1e-5, device=None, dtype=None) -> None:
+        super().__init__()
+        self.d_model = d_model
+        self.eps = eps
+        self.scale = nn.Parameter(torch.ones(d_model, device=device, dtype=dtype))
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Parameters:
+            x: (..., d_model)
+        Returns:
+            output: (..., d_model)
+        """
+        x = x + self.eps
+        norm_x = x.norm(2, dim=-1, keepdim=True)
+        rms_x = norm_x * (self.d_model ** -0.5)
+        x_normalized = x / (rms_x)
+        return x_normalized * self.scale
+    
+
+class SiLU(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Parameters:
+            x: (..., d_model)
+        Returns:
+            output: (..., d_model)
+        """
+        return x * torch.sigmoid(x)
+
+
+class SwiGLU(nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.silu = SiLU()
+    
+    def forward(self, x1, x2: torch.Tensor) -> torch.Tensor:
+        """
+        Parameters:
+            x1: (..., d_model)
+            x2: (..., d_model)
+        Returns:
+            output: (..., d_ff=8/3*d_model)
+        """
+        return self.silu(x1) * x2
+
+
+class FFN(nn.Module):
+    def __init__(self, d_model: int, dff: int) -> None:
+        super().__init__()
+        self.d_model = d_model
+        if dff is None:
+            dff = int(8 * d_model / 3)
+        self.linear1 = Linear(d_model, dff)
+        self.linear2 = Linear(dff, d_model)
+        self.linear3 = Linear(d_model, dff)
+        self.swilu = SwiGLU()
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Parameters:
+            x: (..., d_model)
+        Returns:
+            output: (..., d_model)
+        """
+        x1 = self.linear1(x)
+        x2 = self.linear3(x)
+        x = einsum(
+            self.swilu(x1, x2), self.linear2, "... d_ff, d_model dff -> ... d_model")
+        return x
