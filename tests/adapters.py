@@ -153,7 +153,7 @@ def run_multihead_self_attention(
     self.q_proj.load_state_dict({"weight": q_proj_weight})
     self.k_proj.load_state_dict({"weight": k_proj_weight})
     self.v_proj.load_state_dict({"weight": v_proj_weight})
-    self.out_proj.load_state_dict({"weight": o_proj_weight})
+    self.o_proj.load_state_dict({"weight": o_proj_weight})
     return self(in_features)
 
 
@@ -634,7 +634,20 @@ if __name__ == "__main__":
 #     print("First 10 merges:")
 #     for i in range(10):
 #         print(f"{i}: {merges[i]}")
-    # test softmax
-   x = torch.randn(4, 5)
-   dim = 1
-   print(run_softmax(x, dim).shape)
+    # test self attention
+    d_model = 8
+    num_heads = 2
+    q_proj_weight = torch.arange(d_model * d_model, dtype=torch.float32).view(d_model, d_model)
+    k_proj_weight = torch.arange(d_model * d_model, dtype=torch.float32).view(d_model, d_model)
+    v_proj_weight = torch.arange(d_model * d_model, dtype=torch.float32).view(d_model, d_model)
+    o_proj_weight = torch.arange(d_model * d_model, dtype=torch.float32).view(d_model, d_model)
+    in_features = torch.arange(2 * 4 * d_model, dtype=torch.float32).view(2, 4, d_model)
+    out = run_multihead_self_attention(
+        d_model=d_model,
+        num_heads=num_heads,
+        q_proj_weight=q_proj_weight,
+        k_proj_weight=k_proj_weight,
+        v_proj_weight=v_proj_weight,
+        o_proj_weight=o_proj_weight,
+        in_features=in_features,
+    )

@@ -40,7 +40,8 @@ def scaled_dot_product_attention(
     Returns:
         output: (..., seq_len_q, d_v)
     """
-    scores = einsum(q, k, "... seq_len d_k, ... seq_len d_k -> ... seq_len seq_len") / math.sqrt(q.shape[-1])
+    scores = einsum(
+        q, k, "... seq_len_q d_k, ... seq_len_k d_k -> ... seq_len_q seq_len_k") / math.sqrt(q.size(-1))
     if mask is not None:
         scores = scores.masked_fill(mask == 0, float('-inf'))
     attn_weights = softmax(scores, dim=-1)
