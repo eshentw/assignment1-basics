@@ -6,6 +6,49 @@ from typing import Optional, Tuple
 from einops import rearrange, einsum
 
 
+def softmax(x: torch.Tensor, dim: int) -> torch.Tensor:
+    """
+    A numerically stable implementation of softmax.
+    Parameters:
+        x: (..., n)
+        dim: dimension to apply softmax over
+    Returns:
+        output: (..., n) with softmax applied over `dim`
+    """
+    x_max = rearrange(
+        torch.max(x, dim=dim).values, "... -> ... 1")
+    # avoid overflow by subtracting max
+    # since softmax(x) = softmax(x + c) for any constant c
+    x_exp = torch.exp(x - x_max)
+    x_exp_sum = rearrange(torch.sum(x_exp, dim=dim), "... -> ... 1")
+    return x_exp / x_exp_sum
+
+
+def scaled_dot_product_attention(
+                                q: torch.Tensor, 
+                                k: torch.Tensor, 
+                                v: torch.Tensor, 
+                                mask: Optional[torch.Tensor] = None
+                            ) -> torch.Tensor:
+    """
+    Compute the scaled dot-product attention.
+    Parameters:
+        q: (..., seq_len, d_k)
+        k: (..., seq_len, d_k)
+        v: (..., seq_len, d_v)
+        mask: (seq_len, seq_len) with 1s in positions to attend to and 0s elsewhere
+    Returns:
+        output: (..., seq_len_q, d_v)
+    """
+    scores = einsum(q, k, "... seq_len d_k, ... seq_len d_k -> ... seq_len seq_len") / math.sqrt(q.shape[-1])
+    if mask is not None:
+        scores = scores.masked_fill(mask == 0, float('-inf'))
+    attn_weights = softmax(scores, dim=-1)
+    output = einsum(
+        attn_weights, v, "... seq_len seq_len, ... seq_len d_v -> ... seq_len d_v")
+    return output
+
+
 class Linear(nn.Module):
     def __init__(self, in_features: int, out_features: int, device=None, dtype=None) -> None:
         super().__init__()
@@ -164,3 +207,40 @@ class RoPE(nn.Module):
         x_rotated[..., ::2] = x_rotated_1
         x_rotated[..., 1::2] = x_rotated_2
         return x_rotated
+    
+
+class SelfAttention(nn.Module):
+    def __init__(self, d_model: int, num_heads: int):
+        super().__init__()
+        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_k = d_model // num_heads
+
+        self.q_proj = Linear(self.num_heads * self.d_k, d_model)
+        self.k_proj = Linear(self.num_heads * self.d_k, d_model)
+        self.v_proj = Linear(self.num_heads * self.d_k, d_model)
+        self.o_proj = Linear(d_model, self.num_heads * self.d_k)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Parameters:
+            x: (batch_size, seq_len, d_model)
+        Returns:
+            output: (batch_size, seq_len, d_model)
+        """
+        b, s, _ = x.shape
+
+        q = self.q_proj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
+        q = rearrange(q, "b s (h d) -> b h s d", h=self.num_heads)
+        k = rearrange(k, "b s (h d) -> b h s d", h=self.num_heads)
+        v = rearrange(v, "b s (h d) -> b h s d", h=self.num_heads)
+        
+        casual_mask = torch.triu(torch.ones(s, s, device=x.device), diagonal=1).bool()
+        attn_output = scaled_dot_product_attention(q, k, v, mask=~casual_mask)
+        attn_output = rearrange(attn_output, "b h s d -> b s (h d)")
+
+        output = self.o_proj(attn_output)
+        return output

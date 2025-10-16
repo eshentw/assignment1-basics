@@ -10,7 +10,8 @@ from jaxtyping import Bool, Float, Int
 from torch import Tensor
 from cs336_basics.train_bpe import train_bpe
 from cs336_basics.tokenizer import Tokenizer
-from cs336_basics.model import Linear, Embedding, RMSNorm, FFN, SiLU, RoPE
+from cs336_basics.model import Linear, Embedding, RMSNorm, FFN, SiLU, RoPE, \
+        softmax, scaled_dot_product_attention, SelfAttention
 
 def run_linear(
     d_in: int,
@@ -114,7 +115,7 @@ def run_scaled_dot_product_attention(
     Returns:
         Float[Tensor, " ... queries d_v"]: Output of SDPA
     """
-    raise NotImplementedError
+    return scaled_dot_product_attention(Q, K, V, mask)
 
 
 def run_multihead_self_attention(
@@ -148,7 +149,12 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    self = SelfAttention(d_model=d_model, num_heads=num_heads)
+    self.q_proj.load_state_dict({"weight": q_proj_weight})
+    self.k_proj.load_state_dict({"weight": k_proj_weight})
+    self.v_proj.load_state_dict({"weight": v_proj_weight})
+    self.out_proj.load_state_dict({"weight": o_proj_weight})
+    return self(in_features)
 
 
 def run_multihead_self_attention_with_rope(
@@ -445,7 +451,7 @@ def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, "
         Float[Tensor, "..."]: Tensor of with the same shape as `in_features` with the output of
         softmax normalizing the specified `dim`.
     """
-    raise NotImplementedError
+    return softmax(in_features, dim)
 
 
 def run_cross_entropy(
@@ -628,15 +634,7 @@ if __name__ == "__main__":
 #     print("First 10 merges:")
 #     for i in range(10):
 #         print(f"{i}: {merges[i]}")
-    # test rope
-    d_k = 8
-    theta = 100000.0
-    max_seq_len = 1024
-    in_query_or_key = torch.randn(2, 16, d_k)
-    token_positions = torch.arange(16).unsqueeze(0).repeat(2, 1)
-    out = run_rope(d_k, theta, max_seq_len, in_query_or_key, token_positions)
-    print("Input:")
-    print(in_query_or_key)
-    print("Output:")
-    print(out)
-    print("Output shape:", out.shape)
+    # test softmax
+   x = torch.randn(4, 5)
+   dim = 1
+   print(run_softmax(x, dim).shape)
