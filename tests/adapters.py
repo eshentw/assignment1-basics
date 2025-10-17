@@ -297,12 +297,21 @@ def run_transformer_block(
     """
     decoder = TransformerDecoderLayer(
         d_model=d_model,
-        num_heads=num_heads,
-        d_ff=d_ff,
+        n_heads=num_heads,
+        dff=d_ff,
         theta=theta,
         max_seq_len=max_seq_len,
     )
-    decoder.load_state_dict(weights)
+    decoder.self_attn.q_proj.load_state_dict({"weight": weights["attn.q_proj.weight"]})
+    decoder.self_attn.k_proj.load_state_dict({"weight": weights["attn.k_proj.weight"]})
+    decoder.self_attn.v_proj.load_state_dict({"weight": weights["attn.v_proj.weight"]})
+    decoder.self_attn.o_proj.load_state_dict({"weight": weights["attn.output_proj.weight"]})
+    decoder.ffn.linear1.load_state_dict({"weight": weights["ffn.w1.weight"]})
+    decoder.ffn.linear2.load_state_dict({"weight": weights["ffn.w2.weight"]})
+    decoder.ffn.linear3.load_state_dict({"weight": weights["ffn.w3.weight"]})
+    decoder.norm1.load_state_dict({"scale": weights["ln1.weight"]})
+    decoder.norm2.load_state_dict({"scale": weights["ln2.weight"]})
+    
     return decoder(in_features)
 
 
@@ -391,11 +400,19 @@ def run_transformer_lm(
         d_model=d_model,
         n_layers=num_layers,
         n_heads=num_heads,
-        d_ff=d_ff,
+        dff=d_ff,
         theta=rope_theta,
     )
-    transformer.layers.load_state_dict(weights)
-    transformer.token_embeddings.load_state_dict({"embedding": weights["token_embeddings.weight"]})
+    for i, layer in enumerate(transformer.layers):
+        layer.self_attn.q_proj.load_state_dict({"weight": weights[f"layers.{i}.attn.q_proj.weight"]})
+        layer.self_attn.k_proj.load_state_dict({"weight": weights[f"layers.{i}.attn.k_proj.weight"]})
+        layer.self_attn.v_proj.load_state_dict({"weight": weights[f"layers.{i}.attn.v_proj.weight"]})
+        layer.self_attn.o_proj.load_state_dict({"weight": weights[f"layers.{i}.attn.output_proj.weight"]})
+        layer.ffn.linear1.load_state_dict({"weight": weights[f"layers.{i}.ffn.w1.weight"]})
+        layer.ffn.linear2.load_state_dict({"weight": weights[f"layers.{i}.ffn.w2.weight"]})
+        layer.ffn.linear3.load_state_dict({"weight": weights[f"layers.{i}.ffn.w3.weight"]})
+        
+    transformer.token_embedding.load_state_dict({"embedding": weights["token_embeddings.weight"]})
     transformer.norm.load_state_dict({"scale": weights["ln_final.weight"]})
     transformer.lm_head.load_state_dict({"weight": weights["lm_head.weight"]})
     return transformer(in_indices)

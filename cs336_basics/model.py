@@ -112,9 +112,9 @@ class RMSNorm(nn.Module):
         """
         in_dtype = x.dtype
         x = x.to(torch.float32)
-        norm_x = x.norm(2, dim=-1, keepdim=True) + self.eps
-        rms_x = norm_x * (self.d_model ** -0.5)
-        x_normalized = x / (rms_x)
+        rms = torch.mean(x * x, dim=-1, keepdim=True) + self.eps
+        rms = torch.rsqrt(rms) # 1/ sqrt(rms)
+        x_normalized = x * rms
         return (x_normalized * self.scale).to(in_dtype)
     
 
@@ -302,21 +302,11 @@ class TransformerDecoderLayer(nn.Module):
         self.ffn = FFN(d_model=d_model, dff=dff)
         self.norm2 = RMSNorm(d_model=d_model, device=device, dtype=dtype)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Parameters:
-            x: (batch_size, seq_len, d_model)
-            token_positions: (batch_size, seq_len) or (seq_len,)
-        Returns:
-            output: (batch_size, seq_len, d_model)
-        """
-        out = self.norm1(x)
-        out = self.self_attn(out)
+    def forward(self, x: torch.Tensor, token_positions: Optional[torch.Tensor] = None) -> torch.Tensor:
+        out = self.self_attn(
+            self.norm1(x), token_positions=token_positions)
         x = x + out
-        out = self.norm2(x)
-        out = self.ffn(out)
-        x = x + out
-
+        x = x + self.ffn(self.norm2(x))
         return x
 
 
@@ -356,10 +346,10 @@ class Transformer(nn.Module):
         Returns:
             logits: (batch_size, seq_len, vocab_size)
         """
-        x = self.token_embedding(input_ids)  # (b, s, d_model)
+        x = self.token_embedding(input_ids)
+        token_positions = torch.arange(input_ids.size(1), device=input_ids.device).unsqueeze(0).expand(input_ids.size(0), -1)
         for layer in self.layers:
-            x = layer(x)  # (b, s, d_model)
-        x = self.norm(x)  # (b, s, d_model)
-        out = self.lm_head(x)  # (b, s, vocab_size)
-        logits = softmax(out, dim=-1)
+            x = layer(x, token_positions=token_positions)
+        x = self.norm(x)
+        logits = self.lm_head(x)
         return logits
