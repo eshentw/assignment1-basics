@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from typing import Optional, Tuple
-from einops import rearrange, einsum
+from einops import rearrange, einsum, repeat
 
 
 def softmax(x: torch.Tensor, dim: int) -> torch.Tensor:
@@ -46,7 +46,7 @@ def scaled_dot_product_attention(
         scores = scores.masked_fill(mask == 0, float('-inf'))
     attn_weights = softmax(scores, dim=-1)
     output = einsum(
-        attn_weights, v, "... seq_len seq_len, ... seq_len d_v -> ... seq_len d_v")
+        attn_weights, v, "... seq_len_q seq_len_k, ... seq_len_k d_v -> ... seq_len_q d_v")
     return output
 
 
@@ -198,6 +198,9 @@ class RoPE(nn.Module):
         Returns:
             output: (..., seq_len, d_k)
         """
+        if token_positions.dim() < 2:
+            token_positions = repeat(token_positions, 's -> b s', b=x.size(0))
+
         cos_emb = self.cos_emb[token_positions]  # (..., d_k/2)
         sin_emb = self.sin_emb[token_positions]  # (..., d_k/2)
 
@@ -211,22 +214,34 @@ class RoPE(nn.Module):
     
 
 class SelfAttention(nn.Module):
-    def __init__(self, d_model: int, num_heads: int):
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        theta: Optional[float] = None,
+        max_seq_len: Optional[int] = None,
+        device=None,
+    ) -> None:
         super().__init__()
         assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
         self.d_model = d_model
         self.num_heads = num_heads
         self.d_k = d_model // num_heads
 
-        self.q_proj = Linear(self.num_heads * self.d_k, d_model)
-        self.k_proj = Linear(self.num_heads * self.d_k, d_model)
-        self.v_proj = Linear(self.num_heads * self.d_k, d_model)
-        self.o_proj = Linear(d_model, self.num_heads * self.d_k)
+        self.q_proj = Linear(d_model, d_model)
+        self.k_proj = Linear(d_model, d_model)
+        self.v_proj = Linear(d_model, d_model)
+        self.o_proj = Linear(d_model, d_model)
         
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self.rope = None
+        if theta is not None and max_seq_len is not None:
+            self.rope = RoPE(theta=theta, d_k=self.d_k, max_seq_len=max_seq_len, device=device)
+        
+    def forward(self, x: torch.Tensor, token_positions: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Parameters:
             x: (batch_size, seq_len, d_model)
+            token_positions: (batch_size, seq_len) or (seq_len,)
         Returns:
             output: (batch_size, seq_len, d_model)
         """
@@ -238,6 +253,23 @@ class SelfAttention(nn.Module):
         q = rearrange(q, "b s (h d) -> b h s d", h=self.num_heads)
         k = rearrange(k, "b s (h d) -> b h s d", h=self.num_heads)
         v = rearrange(v, "b s (h d) -> b h s d", h=self.num_heads)
+
+        if self.rope is not None:
+            if token_positions is None:
+                token_positions = torch.arange(s, device=x.device, dtype=torch.long)
+            if token_positions.dim() == 1:
+                token_positions = token_positions.unsqueeze(0).expand(b, -1)
+            elif token_positions.shape[0] == 1 and b > 1:
+                token_positions = token_positions.expand(b, -1)
+            token_positions = token_positions.to(device=x.device, dtype=torch.long)
+
+            flat_positions = repeat(token_positions, "b s -> (b h) s", h=self.num_heads)
+            q = rearrange(q, "b h s d -> (b h) s d")
+            k = rearrange(k, "b h s d -> (b h) s d")
+            q = self.rope(q, flat_positions)
+            k = self.rope(k, flat_positions)
+            q = rearrange(q, "(b h) s d -> b h s d", b=b, h=self.num_heads)
+            k = rearrange(k, "(b h) s d -> b h s d", b=b, h=self.num_heads)
         
         casual_mask = torch.triu(torch.ones(s, s, device=x.device), diagonal=1).bool()
         attn_output = scaled_dot_product_attention(q, k, v, mask=~casual_mask)
