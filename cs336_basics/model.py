@@ -277,3 +277,89 @@ class SelfAttention(nn.Module):
 
         output = self.o_proj(attn_output)
         return output
+    
+
+class TransformerDecoderLayer(nn.Module):
+    def __init__(
+        self,
+        d_model: int,
+        n_heads: int,
+        dff: Optional[int] = None,
+        theta: Optional[float] = None,
+        max_seq_len: Optional[int] = None,
+        device=None,
+        dtype=None,
+    ) -> None:
+        super().__init__()
+        self.self_attn = SelfAttention(
+            d_model=d_model,
+            num_heads=n_heads,
+            theta=theta,
+            max_seq_len=max_seq_len,
+            device=device,
+        )
+        self.norm1 = RMSNorm(d_model=d_model, device=device, dtype=dtype)
+        self.ffn = FFN(d_model=d_model, dff=dff)
+        self.norm2 = RMSNorm(d_model=d_model, device=device, dtype=dtype)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Parameters:
+            x: (batch_size, seq_len, d_model)
+            token_positions: (batch_size, seq_len) or (seq_len,)
+        Returns:
+            output: (batch_size, seq_len, d_model)
+        """
+        out = self.norm1(x)
+        out = self.self_attn(out)
+        x = x + out
+        out = self.norm2(x)
+        out = self.ffn(out)
+        x = x + out
+
+        return x
+
+
+class Transformer(nn.Module):
+    def __init__(
+        self,
+        vocab_size: int,
+        d_model: int,
+        n_layers: int,
+        n_heads: int,
+        dff: Optional[int] = None,
+        max_seq_len: Optional[int] = None,
+        theta: Optional[float] = None,
+        device=None,
+        dtype=None,
+    ) -> None:
+        super().__init__()
+        self.token_embedding = Embedding(vocab_size, d_model, device=device, dtype=dtype)
+        self.layers = nn.ModuleList([
+            TransformerDecoderLayer(
+                d_model=d_model,
+                n_heads=n_heads,
+                dff=dff,
+                theta=theta,
+                max_seq_len=max_seq_len,
+                device=device,
+                dtype=dtype,
+            ) for _ in range(n_layers)
+        ])
+        self.norm = RMSNorm(d_model=d_model, device=device, dtype=dtype)
+        self.lm_head = Linear(d_model, vocab_size, device=device, dtype=dtype)
+    
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """
+        Parameters:
+            input_ids: (batch_size, seq_len) long tensor of token indices
+        Returns:
+            logits: (batch_size, seq_len, vocab_size)
+        """
+        x = self.token_embedding(input_ids)  # (b, s, d_model)
+        for layer in self.layers:
+            x = layer(x)  # (b, s, d_model)
+        x = self.norm(x)  # (b, s, d_model)
+        out = self.lm_head(x)  # (b, s, vocab_size)
+        logits = softmax(out, dim=-1)
+        return logits

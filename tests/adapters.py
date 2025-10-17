@@ -11,7 +11,7 @@ from torch import Tensor
 from cs336_basics.train_bpe import train_bpe
 from cs336_basics.tokenizer import Tokenizer
 from cs336_basics.model import Linear, Embedding, RMSNorm, FFN, SiLU, RoPE, \
-        softmax, scaled_dot_product_attention, SelfAttention
+        softmax, scaled_dot_product_attention, SelfAttention, TransformerDecoderLayer, Transformer
 
 def run_linear(
     d_in: int,
@@ -295,7 +295,15 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    decoder = TransformerDecoderLayer(
+        d_model=d_model,
+        num_heads=num_heads,
+        d_ff=d_ff,
+        theta=theta,
+        max_seq_len=max_seq_len,
+    )
+    decoder.load_state_dict(weights)
+    return decoder(in_features)
 
 
 def run_transformer_lm(
@@ -377,8 +385,21 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
-
+    transformer = Transformer(
+        vocab_size=vocab_size,
+        max_seq_len=context_length,
+        d_model=d_model,
+        n_layers=num_layers,
+        n_heads=num_heads,
+        d_ff=d_ff,
+        theta=rope_theta,
+    )
+    transformer.layers.load_state_dict(weights)
+    transformer.token_embeddings.load_state_dict({"embedding": weights["token_embeddings.weight"]})
+    transformer.norm.load_state_dict({"scale": weights["ln_final.weight"]})
+    transformer.lm_head.load_state_dict({"weight": weights["lm_head.weight"]})
+    return transformer(in_indices)
+    
 
 def run_rmsnorm(
     d_model: int,
