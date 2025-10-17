@@ -411,12 +411,14 @@ def run_transformer_lm(
         layer.ffn.linear1.load_state_dict({"weight": weights[f"layers.{i}.ffn.w1.weight"]})
         layer.ffn.linear2.load_state_dict({"weight": weights[f"layers.{i}.ffn.w2.weight"]})
         layer.ffn.linear3.load_state_dict({"weight": weights[f"layers.{i}.ffn.w3.weight"]})
+        layer.norm1.load_state_dict({"scale": weights[f"layers.{i}.ln1.weight"]})
+        layer.norm2.load_state_dict({"scale": weights[f"layers.{i}.ln2.weight"]})
         
     transformer.token_embedding.load_state_dict({"embedding": weights["token_embeddings.weight"]})
     transformer.norm.load_state_dict({"scale": weights["ln_final.weight"]})
     transformer.lm_head.load_state_dict({"weight": weights["lm_head.weight"]})
     return transformer(in_indices)
-    
+
 
 def run_rmsnorm(
     d_model: int,
