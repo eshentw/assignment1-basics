@@ -2,8 +2,9 @@ import os
 import multiprocessing
 import regex as re
 import heapq
-from collections import Counter
-from typing import Dict, Tuple, BinaryIO, List, Union
+import tqdm
+from collections import Counter, defaultdict
+from typing import Dict, Tuple, BinaryIO, List, Union, DefaultDict, Optional, Set
 
 
 def find_chunk_boundaries(
@@ -80,6 +81,11 @@ class BPETrainer:
         self.vocab: Dict[int, bytes] = {}
         self.token_to_id: Dict[bytes, int] = {}
         self.merges: List[Tuple[bytes, bytes]] = []
+        self.sequences: list[list[int]] = []
+        self.sequence_freqs: list[int] = []
+        self.sequence_pair_counts: list[Counter] = []
+        self.pair_to_sequences: DefaultDict[Tuple[int, int], Set[int]] = defaultdict(set)
+        self.pair_freq: Counter = Counter()
         
     def __initialize(self, data_path: str, vocab_size: int, special_tokens: list[str], num_workers: int = 4):
         self.special_tokens = special_tokens
@@ -93,8 +99,33 @@ class BPETrainer:
             self.corpus_map = self.processing_corpus(
                 data_path, num_workers, split_special, special_tokens
             )
+            self._build_sequence_structures()
         else:
             raise ValueError("Data path must be provided for training.")
+
+    def _build_sequence_structures(self) -> None:
+        """
+        Convert the aggregated corpus_map into sequence structures that allow
+        incremental pair updates without scanning the entire corpus.
+        """
+        self.sequences = []
+        self.sequence_freqs = []
+        self.sequence_pair_counts = []
+        self.pair_to_sequences = defaultdict(set)
+        self.pair_freq = Counter()
+
+        for seq_tuple, freq in self.corpus_map.items():
+            tokens = list(seq_tuple)
+            seq_id = len(self.sequences)
+            self.sequences.append(tokens)
+            self.sequence_freqs.append(freq)
+            pair_counter = Counter(zip(tokens, tokens[1:]))
+            self.sequence_pair_counts.append(pair_counter)
+            for pair, count in pair_counter.items():
+                if count <= 0:
+                    continue
+                self.pair_freq[pair] += count * freq
+                self.pair_to_sequences[pair].add(seq_id)
             
     def build_vocab(self, special_tokens) -> None:
         self.vocab: Dict[int, bytes] = {i: bytes([i]) for i in range(256)}
@@ -157,15 +188,6 @@ class BPETrainer:
                 token_freq[token] += 1
         return token_freq
     
-    def get_pair(self, ) -> Dict[Tuple[bytes, bytes], int]:
-        pair_freq: Dict[Tuple[bytes, bytes], int] = Counter()
-        for seq, freq in self.corpus_map.items():
-            if len(seq) < 2:
-                continue
-            for pair in zip(seq, seq[1:]):
-                pair_freq[pair] += freq
-        return pair_freq
-
     def train(
             self,
             file_path: Union[str, None] = None,
@@ -190,104 +212,162 @@ class BPETrainer:
         assert self.vocab is not None and self.token_to_id is not None 
         assert self.corpus_map is not None
 
-        pair_freq = self.get_pair()
-
-        if not pair_freq:
+        if not self.pair_freq:
             return self.vocab, self.merges
 
-        heap = [(-freq, heap_key(pair, self.vocab), pair) for pair, freq in pair_freq.items()]
+        heap = [(-freq, heap_key(pair, self.vocab), pair) for pair, freq in self.pair_freq.items()]
         heapq.heapify(heap)
         self.merges = []
 
         def decrement_pair(pair: Tuple[int, int], amount: int):
-            current = pair_freq.get(pair)
+            current = self.pair_freq.get(pair)
             if current is None:
-                return
+                return 0
             new_val = current - amount
             if new_val <= 0:
-                pair_freq.pop(pair, None)
+                self.pair_freq.pop(pair, None)
             else:
-                pair_freq[pair] = new_val
+                self.pair_freq[pair] = new_val
                 heapq.heappush(heap, (-new_val, heap_key(pair, self.vocab), pair))
+            return current
 
         def increment_pair(pair: Tuple[int, int], amount: int):
-            new_val = pair_freq.get(pair, 0) + amount
-            pair_freq[pair] = new_val
+            new_val = self.pair_freq.get(pair, 0) + amount
+            self.pair_freq[pair] = new_val
             heapq.heappush(heap, (-new_val, heap_key(pair, self.vocab), pair))
 
-        while self.vocab_size < self.max_vocab_size:
-            while heap:
-                neg_freq, _, pair = heapq.heappop(heap)
-                freq = -neg_freq
-                current = pair_freq.get(pair)
-                if current is None:
-                    continue
-                if current != freq:
-                    heapq.heappush(heap, (-current, heap_key(pair, self.vocab), pair))
-                    continue
-                best_pair = pair
-                break
-            else:
-                break
+        with tqdm.tqdm(total=self.max_vocab_size - self.vocab_size, desc="Training BPE") as pbar:
+            while self.vocab_size < self.max_vocab_size:
+                pbar.update(1)
+                while heap:
+                    neg_freq, _, pair = heapq.heappop(heap)
+                    freq = -neg_freq
+                    current = self.pair_freq.get(pair)
+                    if current is None:
+                        continue
+                    if current != freq:
+                        heapq.heappush(heap, (-current, heap_key(pair, self.vocab), pair))
+                        continue
+                    best_pair = pair
+                    break
+                else:
+                    break
 
-            best_count = pair_freq.get(best_pair, 0)
-            if best_count <= 0:
-                break
+                best_count = self.pair_freq.get(best_pair, 0)
+                if best_count <= 0:
+                    break
 
-            left_bytes, right_bytes = self.vocab[best_pair[0]], self.vocab[best_pair[1]]
-            new_token = left_bytes + right_bytes
-            new_id = self.vocab_size
-            self.vocab[new_id] = new_token
-            self.token_to_id[new_token] = new_id
-            self.vocab_size += 1
-            self.merges.append((left_bytes, right_bytes))
-            pair_freq.pop(best_pair, None)
-            new_freq_map: Dict[Tuple[bytes, bytes], int] = {}
-            any_sequence_updated = False
+                left_bytes, right_bytes = self.vocab[best_pair[0]], self.vocab[best_pair[1]]
+                new_token = left_bytes + right_bytes
+                new_id = self.vocab_size
+                self.vocab[new_id] = new_token
+                self.token_to_id[new_token] = new_id
+                self.vocab_size += 1
+                self.merges.append((left_bytes, right_bytes))
+                affected_sequences = list(self.pair_to_sequences.get(best_pair, []))
+                if not affected_sequences:
+                    self.vocab.pop(new_id, None)
+                    self.token_to_id.pop(new_token, None)
+                    self.vocab_size -= 1
+                    self.merges.pop()
+                    break
 
-            for seq_tuple, seq_freq in self.corpus_map.items():
-                seq = list(seq_tuple)
-                if len(seq) < 2:
-                    new_freq_map[seq_tuple] = new_freq_map.get(seq_tuple, 0) + seq_freq
-                    continue
+                left_id, right_id = best_pair
+                any_sequence_updated = False
 
-                merged: list[int] = []
-                idx = 0
-                updated = False
+                for seq_id in affected_sequences:
+                    seq_tokens = self.sequences[seq_id]
+                    freq = self.sequence_freqs[seq_id]
+                    if len(seq_tokens) < 2:
+                        continue
 
-                while idx < len(seq):
-                    if (
-                        idx + 1 < len(seq)
-                        and self.vocab[seq[idx]] == left_bytes
-                        and self.vocab[seq[idx + 1]] == right_bytes
-                    ):  
-                        if not updated:
-                            for a, b in zip(seq, seq[1:]):
-                                decrement_pair((a, b), seq_freq)
-                            updated = True
+                    idx = 0
+                    updated_sequence = False
+                    while idx < len(seq_tokens) - 1:
+                        if seq_tokens[idx] == left_id and seq_tokens[idx + 1] == right_id:
+                            prev_token = seq_tokens[idx - 1] if idx > 0 else None
+                            next_token = seq_tokens[idx + 2] if idx + 2 < len(seq_tokens) else None
+
+                            # Remove counts for existing pairs
+                            if prev_token is not None:
+                                pair_prev = (prev_token, left_id)
+                                if self.sequence_pair_counts[seq_id].get(pair_prev, 0) > 0:
+                                    self.sequence_pair_counts[seq_id][pair_prev] -= 1
+                                    if self.sequence_pair_counts[seq_id][pair_prev] == 0:
+                                        del self.sequence_pair_counts[seq_id][pair_prev]
+                                        seq_set = self.pair_to_sequences.get(pair_prev)
+                                        if seq_set is not None:
+                                            seq_set.discard(seq_id)
+                                            if not seq_set:
+                                                self.pair_to_sequences.pop(pair_prev, None)
+                                    decrement_pair(pair_prev, freq)
+
+                            pair_current = (left_id, right_id)
+                            if self.sequence_pair_counts[seq_id].get(pair_current, 0) > 0:
+                                self.sequence_pair_counts[seq_id][pair_current] -= 1
+                                if self.sequence_pair_counts[seq_id][pair_current] == 0:
+                                    del self.sequence_pair_counts[seq_id][pair_current]
+                                    seq_set = self.pair_to_sequences.get(pair_current)
+                                    if seq_set is not None:
+                                        seq_set.discard(seq_id)
+                                        if not seq_set:
+                                            self.pair_to_sequences.pop(pair_current, None)
+                                decrement_pair(pair_current, freq)
+
+                            if next_token is not None:
+                                pair_next = (right_id, next_token)
+                                if self.sequence_pair_counts[seq_id].get(pair_next, 0) > 0:
+                                    self.sequence_pair_counts[seq_id][pair_next] -= 1
+                                    if self.sequence_pair_counts[seq_id][pair_next] == 0:
+                                        del self.sequence_pair_counts[seq_id][pair_next]
+                                        seq_set = self.pair_to_sequences.get(pair_next)
+                                        if seq_set is not None:
+                                            seq_set.discard(seq_id)
+                                            if not seq_set:
+                                                self.pair_to_sequences.pop(pair_next, None)
+                                    decrement_pair(pair_next, freq)
+
+                            # Apply merge
+                            seq_tokens[idx] = new_id
+                            seq_tokens.pop(idx + 1)
+                            updated_sequence = True
                             any_sequence_updated = True
-                        merged.append(new_id)
-                        idx += 2
-                    else:
-                        merged.append(seq[idx])
+
+                            # Add counts for new pairs created by the merge
+                            if prev_token is not None:
+                                new_left_pair = (prev_token, new_id)
+                                self.sequence_pair_counts[seq_id][new_left_pair] += 1
+                                self.pair_to_sequences[new_left_pair].add(seq_id)
+                                increment_pair(new_left_pair, freq)
+
+                            if next_token is not None:
+                                new_right_pair = (new_id, next_token)
+                                self.sequence_pair_counts[seq_id][new_right_pair] += 1
+                                self.pair_to_sequences[new_right_pair].add(seq_id)
+                                increment_pair(new_right_pair, freq)
+
+                            # After merging, stay at current index to handle overlapping merges
+                            if prev_token is not None:
+                                idx -= 1
+                                if idx < 0:
+                                    idx = 0
+                            continue
+
                         idx += 1
 
-                merged_tuple = tuple(merged)
-                new_freq_map[merged_tuple] = new_freq_map.get(merged_tuple, 0) + seq_freq
+                    if updated_sequence and len(seq_tokens) < 2:
+                        self.sequence_pair_counts[seq_id] = Counter()
 
-                if updated and len(merged) >= 2:
-                    for a, b in zip(merged, merged[1:]):
-                        increment_pair((a, b), seq_freq)
+                self.pair_to_sequences.pop(best_pair, None)
+                self.pair_freq.pop(best_pair, None)
 
-            if not any_sequence_updated:
-                # No corpus updates; revert merge and treat as convergence
-                self.vocab.pop(new_id, None)
-                self.token_to_id.pop(new_token, None)
-                self.vocab_size -= 1
-                self.merges.pop()
-                break
-
-            self.corpus_map = new_freq_map
+                if not any_sequence_updated:
+                    # No corpus updates; revert merge and treat as convergence
+                    self.vocab.pop(new_id, None)
+                    self.token_to_id.pop(new_token, None)
+                    self.vocab_size -= 1
+                    self.merges.pop()
+                    break
 
         return self.vocab, self.merges
     
