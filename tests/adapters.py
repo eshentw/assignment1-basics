@@ -666,18 +666,38 @@ def run_train_bpe(
     return tokenizer.vocab, tokenizer.merges
 
 if __name__ == "__main__":
-    input_path = "/home/eddie880509/src/llm_from_scratch/assignment1-basics/data/TinyStoriesV2-GPT4-valid.txt"
-    vocab_size = 1000
-    special_tokens = ["<|endoftext|>"]
-    vocab, merges = run_train_bpe(
-        input_path=input_path,
-        vocab_size=vocab_size,
-        special_tokens=special_tokens,
+    # input_path = "/home/eddie880509/src/llm_from_scratch/assignment1-basics/data/TinyStoriesV2-GPT4-valid.txt"
+    # vocab_size = 1000
+    # special_tokens = ["<|endoftext|>"]
+    # vocab, merges = run_train_bpe(
+    #     input_path=input_path,
+    #     vocab_size=vocab_size,
+    #     special_tokens=special_tokens,
+    # )
+    # print(f"Vocab size: {len(vocab)}, Merges size: {len(merges)}")
+    # print("First 10 vocab items:")
+    # for i in range(10):
+    #     print(f"{i}: {vocab[i]}")
+    # print("First 10 merges:")
+    # for i in range(10):
+    #     print(f"{i}: {merges[i]}")
+    inputs = torch.tensor(
+        [
+            [
+                [0.1088, 0.1060, 0.6683, 0.5131, 0.0645],
+                [0.4538, 0.6852, 0.2520, 0.3792, 0.2675],
+                [0.4578, 0.3357, 0.6384, 0.0481, 0.5612],
+                [0.9639, 0.8864, 0.1585, 0.3038, 0.0350],
+            ],
+            [
+                [0.3356, 0.9013, 0.7052, 0.8294, 0.8334],
+                [0.6333, 0.4434, 0.1428, 0.5739, 0.3810],
+                [0.9476, 0.5917, 0.7037, 0.2987, 0.6208],
+                [0.8541, 0.1803, 0.2054, 0.4775, 0.8199],
+            ],
+        ]
     )
-    print(f"Vocab size: {len(vocab)}, Merges size: {len(merges)}")
-    print("First 10 vocab items:")
-    for i in range(10):
-        print(f"{i}: {vocab[i]}")
-    print("First 10 merges:")
-    for i in range(10):
-        print(f"{i}: {merges[i]}")
+    inputs = 1000.0 * inputs
+    targets = torch.tensor([[1, 0, 2, 2], [4, 1, 4, 0]])
+    loss = run_cross_entropy(inputs.view(-1, inputs.size(-1)), targets.view(-1))
+    print(f"Cross-entropy loss: {loss.item()}")

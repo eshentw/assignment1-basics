@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
-
-from cs336_basics.model import softmax
+from einops import rearrange
 
 class CrossEntropyLoss(nn.Module):
     def __init__(self):
@@ -17,7 +16,13 @@ class CrossEntropyLoss(nn.Module):
         Returns:
             torch.Tensor: The computed cross-entropy loss.
         """
-        log_probs = softmax(logits, dim=-1).log()
+        logits_max = rearrange(
+            torch.max(logits, dim=-1).values, "... -> ... 1")
+        # For numerical stability apply log-sum-exp trick
+        stabilized_logits = logits - logits_max
+        exp_logits = torch.exp(stabilized_logits)
+        sum_exp = torch.sum(exp_logits, dim=-1, keepdim=True)
+        log_probs = stabilized_logits - torch.log(sum_exp)
         neg_log_probs_target = -log_probs.gather(1, targets.unsqueeze(1)).squeeze(1)
         loss = neg_log_probs_target.mean()
         return loss
