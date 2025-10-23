@@ -12,6 +12,7 @@ from cs336_basics.train_bpe import train_bpe
 from cs336_basics.tokenizer import Tokenizer
 from cs336_basics.model import Linear, Embedding, RMSNorm, FFN, SiLU, RoPE, \
         softmax, scaled_dot_product_attention, SelfAttention, TransformerDecoderLayer, Transformer
+from cs336_basics.loss import CrossEntropyLoss
 
 def run_linear(
     d_in: int,
@@ -514,7 +515,8 @@ def run_cross_entropy(
     Returns:
         Float[Tensor, ""]: The average cross-entropy loss across examples.
     """
-    raise NotImplementedError
+    celoss = CrossEntropyLoss()
+    return celoss(inputs, targets)
 
 
 def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm: float) -> None:
@@ -664,35 +666,18 @@ def run_train_bpe(
     return tokenizer.vocab, tokenizer.merges
 
 if __name__ == "__main__":
-#     input_path = "/projects/bdxi/yshen10/llm_from_scratch/assignment1-basics/data/owt_train.txt"
-#     vocab_size = 32000
-#     special_tokens = ["<|endoftext|>"]
-#     vocab, merges = run_train_bpe(
-#         input_path=input_path,
-#         vocab_size=vocab_size,
-#         special_tokens=special_tokens,
-#     )
-#     print(f"Vocab size: {len(vocab)}, Merges size: {len(merges)}")
-#     print("First 10 vocab items:")
-#     for i in range(10):
-#         print(f"{i}: {vocab[i]}")
-#     print("First 10 merges:")
-#     for i in range(10):
-#         print(f"{i}: {merges[i]}")
-    # test self attention
-    d_model = 8
-    num_heads = 2
-    q_proj_weight = torch.arange(d_model * d_model, dtype=torch.float32).view(d_model, d_model)
-    k_proj_weight = torch.arange(d_model * d_model, dtype=torch.float32).view(d_model, d_model)
-    v_proj_weight = torch.arange(d_model * d_model, dtype=torch.float32).view(d_model, d_model)
-    o_proj_weight = torch.arange(d_model * d_model, dtype=torch.float32).view(d_model, d_model)
-    in_features = torch.arange(2 * 4 * d_model, dtype=torch.float32).view(2, 4, d_model)
-    out = run_multihead_self_attention(
-        d_model=d_model,
-        num_heads=num_heads,
-        q_proj_weight=q_proj_weight,
-        k_proj_weight=k_proj_weight,
-        v_proj_weight=v_proj_weight,
-        o_proj_weight=o_proj_weight,
-        in_features=in_features,
+    input_path = "/home/eddie880509/src/llm_from_scratch/assignment1-basics/data/TinyStoriesV2-GPT4-valid.txt"
+    vocab_size = 1000
+    special_tokens = ["<|endoftext|>"]
+    vocab, merges = run_train_bpe(
+        input_path=input_path,
+        vocab_size=vocab_size,
+        special_tokens=special_tokens,
     )
+    print(f"Vocab size: {len(vocab)}, Merges size: {len(merges)}")
+    print("First 10 vocab items:")
+    for i in range(10):
+        print(f"{i}: {vocab[i]}")
+    print("First 10 merges:")
+    for i in range(10):
+        print(f"{i}: {merges[i]}")

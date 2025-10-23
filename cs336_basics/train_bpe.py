@@ -74,7 +74,6 @@ def heap_key(pair: Tuple[int, int], vocab: Dict[int, bytes]) -> tuple[int, ...]:
 class BPETrainer:
     def __init__(self,):
         self.pre_token_pattern = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-        self.corpus_map: Dict[Tuple[bytes, ...], int] = {}
         self.vocab_size = 0
         self.max_vocab_size = 0
         self.special_tokens: list[str] = []
@@ -96,14 +95,14 @@ class BPETrainer:
         self.max_vocab_size = vocab_size
         split_special = special_tokens[0].encode("utf-8") if special_tokens else b""
         if data_path is not None:
-            self.corpus_map = self.processing_corpus(
+            corpus = self.processing_corpus(
                 data_path, num_workers, split_special, special_tokens
             )
-            self._build_sequence_structures()
+            self._build_sequence_structures(corpus)
         else:
             raise ValueError("Data path must be provided for training.")
 
-    def _build_sequence_structures(self) -> None:
+    def _build_sequence_structures(self, corpus) -> None:
         """
         Convert the aggregated corpus_map into sequence structures that allow
         incremental pair updates without scanning the entire corpus.
@@ -111,10 +110,10 @@ class BPETrainer:
         self.sequences = []
         self.sequence_freqs = []
         self.sequence_pair_counts = []
-        self.pair_to_sequences = defaultdict(set)
+        self.pair_to_sequences = defaultdict(set) # pair -> set of sequence ids representing sequences containing the pair
         self.pair_freq = Counter()
 
-        for seq_tuple, freq in self.corpus_map.items():
+        for seq_tuple, freq in corpus.items():
             tokens = list(seq_tuple)
             seq_id = len(self.sequences)
             self.sequences.append(tokens)
@@ -210,7 +209,6 @@ class BPETrainer:
             raise ValueError("Tokenizer is uninitialized. Provide training data or load weights before calling train.")
 
         assert self.vocab is not None and self.token_to_id is not None 
-        assert self.corpus_map is not None
 
         if not self.pair_freq:
             return self.vocab, self.merges
@@ -240,6 +238,7 @@ class BPETrainer:
             while self.vocab_size < self.max_vocab_size:
                 pbar.update(1)
                 while heap:
+                    # most frequent pair in laxconical order
                     neg_freq, _, pair = heapq.heappop(heap)
                     freq = -neg_freq
                     current = self.pair_freq.get(pair)
