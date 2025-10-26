@@ -88,12 +88,17 @@ def cosine_lr_scheduling(t, T_w, T_c, lr_max, lr_min):
 
 
 def gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_norm: float):
+    global_norm = 0.0
     for p in parameters:
         if p.grad is not None:
-            norm = p.grad.data.norm(2)
-            if norm > max_norm:
-                clip_coef = max_norm / (norm + 1e-6)
-                p.grad.data *= clip_coef
+            global_norm += (p.grad.data ** 2).sum().item()
+    global_norm = math.sqrt(global_norm)
+    if global_norm > max_norm:
+        clip_coef = max_norm / (global_norm + 1e-6)
+        for p in parameters:
+            if p.grad is not None:
+                p.grad.data.mul_(clip_coef)
+        
 
 
 def sgd_example():
